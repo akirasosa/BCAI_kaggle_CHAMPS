@@ -399,24 +399,31 @@ model = GraphTransformer(
 model.eval()
 
 # %%
-for x_idx, x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle, y in loader:
-    x_atom = x_atom.to(device)
-    x_atom_pos = x_atom_pos.to(device)
-    x_bond = x_bond.to(device)
-    x_bond_dist = x_bond_dist.to(device)
-    x_triplet = x_triplet.to(device)
-    x_triplet_angle = x_triplet_angle.to(device)
-    x_quad = x_quad.to(device)
-    x_quad_angle = x_quad_angle.to(device)
-    y = y.to(device)
-    print(y)
+for step, batch in enumerate(loader):
+    batch = [
+        item.to(device)
+        for n, item in enumerate(batch)
+    ]
+    x_atom = batch[1]
+    x_atom_pos = batch[2]
+    x_bond = batch[3]
+    x_bond_dist = batch[4]
+    x_triplet = batch[5]
+    x_triplet_angle = batch[6]
+    x_quad = batch[7]
+    x_quad_angle = batch[8]
+    y = batch[9]
 
     x_bond, x_bond_dist, y = x_bond[:, :MAX_BOND_COUNT], x_bond_dist[:, :MAX_BOND_COUNT], y[:, :MAX_BOND_COUNT]
 
+    # print(f'x_atom: {x_atom.shape}')
+    # print(f'y: {y.shape}')
+
     with torch.no_grad():
         y_pred, _ = model(x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle)
-        print(y_pred.shape)
+        # print(f'y_pred: {y_pred.shape}')
         b_abs_err, b_type_err, b_type_cnt = loss(y_pred, y, x_bond)
-        print(b_abs_err, b_type_err, b_type_cnt)
+        # print(b_abs_err, b_type_err, b_type_cnt)
 
-    break
+    if step == 0:
+        break
