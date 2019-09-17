@@ -332,6 +332,11 @@ class GraphTransformer(nn.Module):
         mask = torch.einsum('bi, bj->bij', mask, mask)
         new_mask = -1e20 * torch.ones_like(mask).to(mask.device)
         new_mask[mask > 0] = 0
+
+        print(self.atom_embedding(x_atom[:, :, :3], x_atom_pos[:, :, 3:]).shape)
+        print(self.bond_embedding(x_bond[:, :, :3], x_bond_dist).shape)
+        print(self.triplet_embedding(x_triplet[:, :, :2], x_triplet_angle).shape)
+        print(self.quad_embedding(x_quad[:, :, :1], x_quad_angle).shape)
         if self.use_quad:
             Z = torch.cat([
                 self.atom_embedding(x_atom[:, :, :3], x_atom_pos[:, :, 3:]),
@@ -425,5 +430,5 @@ for step, batch in enumerate(loader):
         b_abs_err, b_type_err, b_type_cnt = loss(y_pred, y, x_bond)
         # print(b_abs_err, b_type_err, b_type_cnt)
 
-    if step == 0:
+    if step == 1:
         break
