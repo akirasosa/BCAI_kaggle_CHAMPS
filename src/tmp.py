@@ -24,14 +24,37 @@ with gzip.open(root_dir + f"/torch_proc_train{mode}_p1.pkl.gz", "rb") as f:
 dataset = TensorDataset(*D_train_part1)
 loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
+# %%
 NUM_ATOM_TYPES = [int(dataset.tensors[1][:, :, i].max()) for i in range(3)]
 NUM_BOND_TYPES = [int(dataset.tensors[3][:, :, i].max()) for i in range(3)]
 NUM_TRIPLET_TYPES = [int(dataset.tensors[5][:, :, i].max()) for i in range(2)]
 NUM_QUAD_TYPES = [int(dataset.tensors[7][:, :, i].max()) for i in range(1)]
 MAX_BOND_COUNT = 250
+NUM_BOND_ORIG_TYPES = 8
 
 
 # %%
+# noinspection PyUnreachableCode
+def loss(y_pred, y, x_bond):
+    y_pred_pad = torch.cat([torch.zeros(y_pred.shape[0], 1, y_pred.shape[2], device=y_pred.device), y_pred], dim=1)
+
+    # Note: The [:,:,1] below should match the num_bond_types[1]*final_dim in graph transformer
+    y_pred_scaled = y_pred_pad.gather(1, x_bond[:, :, 1][:, None, :])[:, 0, :] * y[:, :, 2] + y[:, :, 1]
+    abs_dy = (y_pred_scaled - y[:, :, 0]).abs()
+    loss_bonds = (x_bond[:, :, 0] > 0)
+    abs_err = abs_dy.masked_select(loss_bonds & (y[:, :, 3] > 0)).sum()
+
+    type_dy = [abs_dy.masked_select(x_bond[:, :, 0] == i) for i in range(1, NUM_BOND_ORIG_TYPES + 1)]
+    # if args.champs_loss:
+    if False:
+        type_err = torch.cat([t.sum().view(1) for t in type_dy], dim=0)
+        type_cnt = torch.cat([torch.sum(x_bond[:, :, 0] == i).view(1) for i in range(1, NUM_BOND_ORIG_TYPES + 1)])
+    else:
+        type_err = torch.tensor([t.sum() for t in type_dy])
+        type_cnt = torch.tensor([len(t) for t in type_dy])
+    return abs_err, type_err, type_cnt
+
+
 def sqdist(A, B):
     return (A ** 2).sum(dim=2)[:, :, None] + (B ** 2).sum(dim=2)[:, None, :] - 2 * torch.bmm(A, B.transpose(1, 2))
 
@@ -121,6 +144,7 @@ class GraphLayer(nn.Module):
         return self.proj2(self.dropout(F.relu(self.proj1(Z)))) + inp
 
 
+# noinspection PyShadowingNames
 class GraphTransformer(nn.Module):
     def __init__(self, dim, n_layers, final_dim, d_inner,
                  fdim=30,
@@ -147,23 +171,69 @@ class GraphTransformer(nn.Module):
         num_bond_types = np.array(num_bond_types)
         num_triplet_types = np.array(num_triplet_types)
         num_quad_types = np.array(num_quad_types)
-        self.atom_embedding = LearnableEmbedding(len(num_atom_types), num_atom_types + 1,
-                                                 d_embeds=dim - self.fdim, d_feature=self.fdim, n_feature=2) \
-            if atom_angle_embedding == "learnable" else SineEmbedding(len(num_atom_types), num_atom_types + 1, dim,
-                                                                      n_feature=2)
-        self.bond_embedding = LearnableEmbedding(len(num_bond_types), num_bond_types + 1,
-                                                 d_embeds=dim - self.fdim, d_feature=self.fdim, n_feature=1) \
-            if dist_embedding == "learnable" else SineEmbedding(len(num_bond_types), num_bond_types + 1, dim,
-                                                                n_feature=1)
-        self.triplet_embedding = LearnableEmbedding(len(num_triplet_types), num_triplet_types + 1,
-                                                    d_embeds=dim - self.fdim, d_feature=self.fdim, n_feature=1) \
-            if trip_angle_embedding == "learnable" else SineEmbedding(len(num_triplet_types), num_triplet_types + 1,
-                                                                      dim)
+
+        if atom_angle_embedding == "learnable":
+            self.atom_embedding = LearnableEmbedding(
+                len(num_atom_types),
+                num_atom_types + 1,
+                d_embeds=dim - self.fdim,
+                d_feature=self.fdim,
+                n_feature=2,
+            )
+        else:
+            self.atom_embedding = SineEmbedding(
+                len(num_atom_types),
+                num_atom_types + 1,
+                dim,
+                n_feature=2,
+            )
+
+        if dist_embedding == "learnable":
+            self.bond_embedding = LearnableEmbedding(
+                len(num_bond_types),
+                num_bond_types + 1,
+                d_embeds=dim - self.fdim,
+                d_feature=self.fdim,
+                n_feature=1,
+            )
+        else:
+            self.bond_embedding = SineEmbedding(
+                len(num_bond_types),
+                num_bond_types + 1,
+                dim,
+                n_feature=1,
+            )
+
+        if trip_angle_embedding == "learnable":
+            self.triplet_embedding = LearnableEmbedding(
+                len(num_triplet_types),
+                num_triplet_types + 1,
+                d_embeds=dim - self.fdim,
+                d_feature=self.fdim,
+                n_feature=1,
+            )
+        else:
+            self.triplet_embedding = SineEmbedding(
+                len(num_triplet_types),
+                num_triplet_types + 1,
+                dim,
+            )
 
         if use_quad:
-            self.quad_embedding = LearnableEmbedding(len(num_quad_types), num_quad_types + 1,
-                                                     d_embeds=dim - self.fdim, d_feature=self.fdim, n_feature=1) \
-                if quad_angle_embedding == "learnable" else SineEmbedding(len(num_quad_types), num_quad_types + 1, dim)
+            if quad_angle_embedding == "learnable":
+                self.quad_embedding = LearnableEmbedding(
+                    len(num_quad_types),
+                    num_quad_types + 1,
+                    d_embeds=dim - self.fdim,
+                    d_feature=self.fdim,
+                    n_feature=1,
+                )
+            else:
+                self.quad_embedding = SineEmbedding(
+                    len(num_quad_types),
+                    num_quad_types + 1,
+                    dim,
+                )
 
         self.dim = dim
         self.min_bond_dist = min_bond_dist
@@ -174,9 +244,20 @@ class GraphTransformer(nn.Module):
 
         self.n_head = n_head
         assert dim % n_head == 0, "dim must be a multiple of n_head"
-        self.layers = nn.ModuleList(
-            [GraphLayer(d_model=dim, d_inner=d_inner, n_head=n_head, d_head=dim // n_head, dropout=dropout,
-                        attn_dropout=dropatt, wnorm=wnorm, use_quad=use_quad, lev=i + 1) for i in range(n_layers)])
+        self.layers = nn.ModuleList([
+            GraphLayer(
+                d_model=dim,
+                d_inner=d_inner,
+                n_head=n_head,
+                d_head=dim // n_head,
+                dropout=dropout,
+                attn_dropout=dropatt,
+                wnorm=wnorm,
+                use_quad=use_quad,
+                lev=i + 1,
+            )
+            for i in range(n_layers)
+        ])
 
         self.final_norm = nn.LayerNorm(dim)
 
@@ -296,7 +377,7 @@ class GraphTransformer(nn.Module):
 model = GraphTransformer(
     dim=650,
     # n_layers=14,
-    n_layers=2,
+    n_layers=1,
     d_inner=3800,
     fdim=200,
     final_dim=280,
@@ -328,11 +409,14 @@ for x_idx, x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, 
     x_quad = x_quad.to(device)
     x_quad_angle = x_quad_angle.to(device)
     y = y.to(device)
+    print(y)
 
     x_bond, x_bond_dist, y = x_bond[:, :MAX_BOND_COUNT], x_bond_dist[:, :MAX_BOND_COUNT], y[:, :MAX_BOND_COUNT]
 
     with torch.no_grad():
-        out, _ = model(x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle)
-    print(out.shape)
+        y_pred, _ = model(x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle)
+        print(y_pred.shape)
+        b_abs_err, b_type_err, b_type_cnt = loss(y_pred, y, x_bond)
+        print(b_abs_err, b_type_err, b_type_cnt)
 
     break
