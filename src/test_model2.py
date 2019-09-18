@@ -116,8 +116,7 @@ class GraphTransformer(nn.Module):
                  dropout=0.0,
                  dropatt=0.0,
                  n_head=10,
-                 wnorm=False,
-                 use_quad=False):
+                 wnorm=False):
         super().__init__()
 
         self.atom_embedding = nn.Embedding(5, dim)
@@ -184,7 +183,6 @@ model = GraphTransformer(
     dropatt=0.0,
     n_head=10,
     wnorm=True,
-    use_quad=True,
 ).to(device)
 model.eval()
 
