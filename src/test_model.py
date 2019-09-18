@@ -129,8 +129,8 @@ class GraphLayer(nn.Module):
         inp = Z
         Z = self.norm1(Z)
         Z2, Z3, Z4 = self.qkv_net(Z).view(bsz, n_elem, n_head, 3 * d_head).chunk(3, dim=3)  # "V, Q, K"
-        W = -(gamma_mask * D)[:, None] + torch.einsum('bnij, bmij->binm', Z3, Z4).type(D.dtype) / self.sqrtd + new_mask[
-                                                                                                               :, None]
+        W = torch.einsum('bnij, bmij->binm', Z3, Z4).type(D.dtype) / self.sqrtd
+        W = W + new_mask[:, None] - (gamma_mask * D)[:, None]
         W = self.attn_dropout(F.softmax(W, dim=3).type(mask.dtype) * mask[:, None])  # softmax(-gamma*D + Q^TK)
         if store:
             pickle.dump(W.cpu().detach().numpy(), open(f'analysis/layer_{self.lev}_W.pkl', 'wb'))
@@ -280,7 +280,7 @@ class GraphTransformer(nn.Module):
         P = x_triplet.shape[1]
         Q = x_quad.shape[1] if self.use_quad else 0
 
-        D = torch.zeros(x_atom.shape[0], N + M + P + Q, N + M + P + Q, device=x_atom.device)
+        D = torch.zeros(bsz, N + M + P + Q, N + M + P + Q, device=x_atom.device)
         RA = slice(0, N)
         RB = slice(N, N + M)
         RT = slice(N + M, N + M + P)
@@ -324,19 +324,27 @@ class GraphTransformer(nn.Module):
 
         # No interaction (as in attention = 0) if query or key is the zero padding...
         if self.use_quad:
-            mask = torch.cat([x_atom[:, :, 0] > 0, x_bond[:, :, 0] > 0, x_triplet[:, :, 0] > 0, x_quad[:, :, 0] > 0],
-                             dim=1).type(x_atom_pos.dtype)
+            mask = torch.cat([
+                x_atom[:, :, 0] > 0,
+                x_bond[:, :, 0] > 0,
+                x_triplet[:, :, 0] > 0,
+                x_quad[:, :, 0] > 0
+            ], dim=1).type(x_atom_pos.dtype)
         else:
-            mask = torch.cat([x_atom[:, :, 0] > 0, x_bond[:, :, 0] > 0, x_triplet[:, :, 0] > 0], dim=1).type(
-                x_atom_pos.dtype)
+            mask = torch.cat([
+                x_atom[:, :, 0] > 0,
+                x_bond[:, :, 0] > 0,
+                x_triplet[:, :, 0] > 0
+            ], dim=1).type(x_atom_pos.dtype)
         mask = torch.einsum('bi, bj->bij', mask, mask)
+
         new_mask = -1e20 * torch.ones_like(mask).to(mask.device)
         new_mask[mask > 0] = 0
 
-        print(self.atom_embedding(x_atom[:, :, :3], x_atom_pos[:, :, 3:]).shape)
-        print(self.bond_embedding(x_bond[:, :, :3], x_bond_dist).shape)
-        print(self.triplet_embedding(x_triplet[:, :, :2], x_triplet_angle).shape)
-        print(self.quad_embedding(x_quad[:, :, :1], x_quad_angle).shape)
+        # print(self.atom_embedding(x_atom[:, :, :3], x_atom_pos[:, :, 3:]).shape)
+        # print(self.bond_embedding(x_bond[:, :, :3], x_bond_dist).shape)
+        # print(self.triplet_embedding(x_triplet[:, :, :2], x_triplet_angle).shape)
+        # print(self.quad_embedding(x_quad[:, :, :1], x_quad_angle).shape)
         if self.use_quad:
             Z = torch.cat([
                 self.atom_embedding(x_atom[:, :, :3], x_atom_pos[:, :, 3:]),
@@ -352,7 +360,6 @@ class GraphTransformer(nn.Module):
             ], dim=1)
 
         # PART II: Pass through a bunch of self-attention and position-wise feed-forward blocks
-        seed = np.random.uniform(0, 1)
         for i in range(len(self.layers)):
             Z = self.layers[i](Z, D, new_mask, mask, RA, RB, RT, RQ, store=False)
 
@@ -426,9 +433,31 @@ for step, batch in enumerate(loader):
 
     with torch.no_grad():
         y_pred, _ = model(x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle)
-        # print(f'y_pred: {y_pred.shape}')
+        print(f'y_pred: {y_pred.shape}')
         b_abs_err, b_type_err, b_type_cnt = loss(y_pred, y, x_bond)
         # print(b_abs_err, b_type_err, b_type_cnt)
 
-    if step == 1:
+    if step == 0:
         break
+
+# %%
+a = torch.tensor([
+    [0, 0, 0],
+    [1, 0, 0],
+    [0, 1, 0],
+]).unsqueeze(dim=0)
+print(a.shape)
+sqdist(a, a)
+
+# %%
+mask = torch.tensor([
+    [0, 1, 1],
+    [1, 0, 1],
+])
+mask = torch.einsum('bi, bj->bij', mask, mask)
+mask
+
+# %%
+new_mask = -1e20 * torch.ones_like(mask).to(mask.device)
+new_mask[mask > 0] = 0
+new_mask
