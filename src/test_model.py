@@ -1,5 +1,6 @@
 import gzip
 import pickle
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,13 +12,13 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from graph_transformer import GraphTransformer
 from modules.embeddings import LearnableEmbedding, SineEmbedding
+from utils import const
 
 mode = '_full'
-root_dir = '/home/akirasosa/.ghq/github.com/akirasosa/BCAI_kaggle_CHAMPS/processed'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # %%
-with gzip.open(root_dir + f"/torch_proc_train{mode}_p1.pkl.gz", "rb") as f:
+with gzip.open(Path(const.DATA_DIR, 'processed', f"torch_proc_train{mode}_p1.pkl.gz"), "rb") as f:
     print("Wait Patiently! Combining part 1 & 2 of the dataset so that we don't need to do it in the future.")
     D_train_part1 = pickle.load(f)
 
@@ -130,6 +131,7 @@ class GraphLayer(nn.Module):
         Z = self.norm1(Z)
         Z2, Z3, Z4 = self.qkv_net(Z).view(bsz, n_elem, n_head, 3 * d_head).chunk(3, dim=3)  # "V, Q, K"
         W = torch.einsum('bnij, bmij->binm', Z3, Z4).type(D.dtype) / self.sqrtd
+        print(1, new_mask.dtype)
         W = W + new_mask[:, None] - (gamma_mask * D)[:, None]
         W = self.attn_dropout(F.softmax(W, dim=3).type(mask.dtype) * mask[:, None])  # softmax(-gamma*D + Q^TK)
         if store:
