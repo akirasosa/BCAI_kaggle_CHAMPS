@@ -14,6 +14,7 @@ from graph_transformer import GraphTransformer
 from modules.blocks import MLP
 from proj import const
 from proj.loader import PandasDataset, atoms_collate_fn
+from proj.util import get_scc_type_encoder
 from utils.funcs import batched_index_select
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,15 +54,13 @@ def loss(y_pred, y, x_bond):
     return abs_err, type_err, type_cnt
 
 
-def loss2(y_pred, y_true, y_types, y_scaler):
+def calc_grouped_mae(y_pred, y_true, y_types, y_scaler):
     y_pred_scaled = y_pred.squeeze(dim=2) * y_scaler[:, :, 1] + y_scaler[:, :, 0]
     abs_err = (y_pred_scaled - y_true.squeeze(dim=2)).abs()
     mae_types = scatter_mean(abs_err.view(-1), y_types.view(-1))[1:]  # 0 is pad
     cnt_types = scatter_add(torch.ones_like(abs_err.view(-1)), y_types.view(-1))[1:]
-    nonzero_indices = cnt_types.nonzero()
-    champs_loss = torch.log(mae_types[nonzero_indices] + 1e-9).mean()
 
-    return champs_loss
+    return mae_types, cnt_types
 
 
 def sqdist(A, B):
@@ -222,6 +221,11 @@ for step, batch in enumerate(loader):
     with torch.no_grad():
         y_pred = model(batch)
         print(f'y_pred: {y_pred.shape}')
-        loss2(y_pred, batch.scc_val, batch.scc_type, batch.scc_scaler)
+
+        mae_types, cnt_types = calc_grouped_mae(y_pred, batch.scc_val, batch.scc_type, batch.scc_scaler)
+
+        enc = get_scc_type_encoder()
+        for n, (mae, cnt) in enumerate(zip(mae_types, cnt_types)):
+            print(const.TYPES[n], mae.item(), cnt.item())
         # print(b_abs_err, b_type_err, b_type_cnt)
     break
