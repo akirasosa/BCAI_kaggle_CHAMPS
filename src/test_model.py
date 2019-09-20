@@ -12,7 +12,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from graph_transformer import GraphTransformer
 from modules.embeddings import LearnableEmbedding, SineEmbedding
-from utils import const
+from proj import const
 
 mode = '_full'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -432,6 +432,7 @@ for step, batch in enumerate(loader):
 
     # print(f'x_atom: {x_atom.shape}')
     # print(f'y: {y.shape}')
+    print(y)
 
     with torch.no_grad():
         y_pred, _ = model(x_atom, x_atom_pos, x_bond, x_bond_dist, x_triplet, x_triplet_angle, x_quad, x_quad_angle)

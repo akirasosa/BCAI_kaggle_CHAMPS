@@ -1,27 +1,31 @@
-import gzip
+import dataclasses
 import pickle
-from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import DataLoader
+from torch_scatter import scatter_mean, scatter_add
 
 from graph_transformer import GraphTransformer
-from utils import const
+from modules.blocks import MLP
+from proj import const
+from proj.loader import PandasDataset, atoms_collate_fn
+from utils.funcs import batched_index_select
 
-mode = '_full'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # %%
-with gzip.open(Path(const.DATA_DIR, 'processed', f"torch_proc_train{mode}_p1.pkl.gz"), "rb") as f:
-    print("Wait Patiently! Combining part 1 & 2 of the dataset so that we don't need to do it in the future.")
-    D_train_part1 = pickle.load(f)
-
-dataset = TensorDataset(*D_train_part1)
-loader = DataLoader(dataset, batch_size=2, shuffle=False)
+dataset = PandasDataset(pd.read_pickle(const.DATA_DIR / 'artifacts' / 'data.pkl'))
+loader = DataLoader(
+    dataset,
+    batch_size=2,
+    shuffle=False,
+    collate_fn=atoms_collate_fn,
+)
 
 # %%
 MAX_BOND_COUNT = 250
@@ -29,7 +33,6 @@ NUM_BOND_ORIG_TYPES = 8
 
 
 # %%
-# noinspection PyUnreachableCode
 def loss(y_pred, y, x_bond):
     y_pred_pad = torch.cat([torch.zeros(y_pred.shape[0], 1, y_pred.shape[2], device=y_pred.device), y_pred], dim=1)
 
@@ -50,8 +53,29 @@ def loss(y_pred, y, x_bond):
     return abs_err, type_err, type_cnt
 
 
+def loss2(y_pred, y_true, y_types, y_scaler):
+    y_pred_scaled = y_pred.squeeze(dim=2) * y_scaler[:, :, 1] + y_scaler[:, :, 0]
+    abs_err = (y_pred_scaled - y_true.squeeze(dim=2)).abs()
+    mae_types = scatter_mean(abs_err.view(-1), y_types.view(-1))[1:]  # 0 is pad
+    cnt_types = scatter_add(torch.ones_like(abs_err.view(-1)), y_types.view(-1))[1:]
+    nonzero_indices = cnt_types.nonzero()
+    champs_loss = torch.log(mae_types[nonzero_indices] + 1e-9).mean()
+
+    return champs_loss
+
+
 def sqdist(A, B):
     return (A ** 2).sum(dim=2)[:, :, None] + (B ** 2).sum(dim=2)[:, None, :] - 2 * torch.bmm(A, B.transpose(1, 2))
+
+
+@dataclasses.dataclass
+class AtomsData:
+    atom_type: torch.Tensor
+    atom_pos: torch.Tensor
+    scc_idx: torch.Tensor
+    scc_type: torch.Tensor
+    scc_val: torch.Tensor
+    scc_scaler: torch.Tensor
 
 
 class GraphLayer(nn.Module):
@@ -110,7 +134,6 @@ class GraphLayer(nn.Module):
         return self.proj2(self.dropout(F.relu(self.proj1(Z)))) + inp
 
 
-# noinspection PyShadowingNames
 class GraphTransformer(nn.Module):
     def __init__(self, dim, n_layers, d_inner,
                  dropout=0.0,
@@ -119,7 +142,7 @@ class GraphTransformer(nn.Module):
                  wnorm=False):
         super().__init__()
 
-        self.atom_embedding = nn.Embedding(5, dim)
+        self.atom_embedding = nn.Embedding(const.N_ATOMS + 1, dim, padding_idx=0)
         self.layers = nn.ModuleList([
             GraphLayer(
                 d_model=dim,
@@ -133,28 +156,30 @@ class GraphTransformer(nn.Module):
             )
             for i in range(n_layers)
         ])
+        self.pair_mlp = MLP(n_in=dim * 2, n_out=1, n_layers=2)
+        self.apply(self.weights_init)
 
-    def forward(self, x_atom, x_atom_pos):
-        # PART I: Form the embeddings and the distance matrix
-        D = sqdist(x_atom_pos[:, :, :3],
-                   x_atom_pos[:, :, :3]).to(device)
+    def forward(self, inputs: AtomsData):
+        D = sqdist(inputs.atom_pos[:, :, :3],
+                   inputs.atom_pos[:, :, :3]).to(device)
 
-        mask = x_atom[:, :, 0] > 0
-        mask = torch.einsum('bi, bj->bij', mask, mask).type(x_atom_pos.dtype)
+        mask = inputs.atom_type[:, :, 0] > 0
+        mask = torch.einsum('bi, bj->bij', mask, mask).type(inputs.atom_pos.dtype)
 
         new_mask = -1e20 * torch.ones_like(mask).to(mask.device)
         new_mask[mask > 0] = 0
-        print(1, mask.dtype)
 
-        Z = self.atom_embedding(x_atom[:, :, 0])
+        Z = self.atom_embedding(inputs.atom_type[:, :, 0])
 
-        # PART II: Pass through a bunch of self-attention and position-wise feed-forward blocks
         for i in range(len(self.layers)):
             Z = self.layers[i](Z, D, new_mask, mask, store=False)
 
-        self.apply(self.weights_init)
+        x_idx_0 = batched_index_select(Z, 1, inputs.scc_idx[:, :, 0])
+        x_idx_1 = batched_index_select(Z, 1, inputs.scc_idx[:, :, 1])
+        x_pair = torch.cat((x_idx_0, x_idx_1), dim=2)
+        y_pred = self.pair_mlp(x_pair)
 
-        return Z
+        return y_pred
 
     @staticmethod
     def init_weight(weight):
@@ -188,53 +213,15 @@ model.eval()
 
 # %%
 for step, batch in enumerate(loader):
-    batch = [
-        item.to(device)
-        for n, item in enumerate(batch)
-    ]
-    x_atom = batch[1]
-    x_atom_pos = batch[2]
-    x_bond = batch[3]
-    x_bond_dist = batch[4]
-    x_triplet = batch[5]
-    x_triplet_angle = batch[6]
-    x_quad = batch[7]
-    x_quad_angle = batch[8]
-    y = batch[9]
-
-    x_bond, x_bond_dist, y = x_bond[:, :MAX_BOND_COUNT], x_bond_dist[:, :MAX_BOND_COUNT], y[:, :MAX_BOND_COUNT]
-
-    print(f'x_atom: {x_atom.shape}')
-    print(x_atom)
-    # print(f'y: {y.shape}')
+    batch = {
+        k: v.to(device)
+        for k, v in batch.items()
+    }
+    batch = AtomsData(**batch)
 
     with torch.no_grad():
-        y_pred, _ = model(x_atom, x_atom_pos)
+        y_pred = model(batch)
         print(f'y_pred: {y_pred.shape}')
-        # b_abs_err, b_type_err, b_type_cnt = loss(y_pred, y, x_bond)
+        loss2(y_pred, batch.scc_val, batch.scc_type, batch.scc_scaler)
         # print(b_abs_err, b_type_err, b_type_cnt)
-
-    if step == 0:
-        break
-
-# %%
-a = torch.tensor([
-    [0, 0, 0],
-    [1, 0, 0],
-    [0, 1, 0],
-]).unsqueeze(dim=0)
-print(a.shape)
-sqdist(a, a)
-
-# %%
-mask = torch.tensor([
-    [0, 1, 1],
-    [1, 0, 1],
-])
-mask = torch.einsum('bi, bj->bij', mask, mask)
-mask
-
-# %%
-new_mask = -1e20 * torch.ones_like(mask).to(mask.device)
-new_mask[mask > 0] = 0
-new_mask
+    break
