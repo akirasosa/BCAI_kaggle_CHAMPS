@@ -1,14 +1,13 @@
 import dataclasses
 import logging
-import os
 import pickle
-import shutil
 from multiprocessing import cpu_count
 from pathlib import Path
 from pprint import pformat
 from time import time
 from typing import Dict, Callable
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -21,15 +20,15 @@ from torch.optim.lr_scheduler import CyclicLR
 from torch.utils.data import DataLoader
 from torch_scatter import scatter_add
 from torch_scatter import scatter_mean
+from tqdm.notebook import tqdm
 
-from my_lib.torch.modules import MLP
 from my_lib.common.avg_meter import AverageMeterSet
 from my_lib.common.early_stopping import EarlyStopping
 from my_lib.torch.funcs import sqdist, batched_index_select
+from my_lib.torch.modules import MLP
 from my_lib.torch.optim import RAdam
 from proj import const
 from proj.loader import PandasDataset, atoms_collate_fn
-import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -61,7 +60,7 @@ class Conf:
     tformer_n_layers: int = 14
     tformer_d_inner: int = 3800
     tformer_dropout: float = 0.03
-    tformer_dropatt: float = 0.03
+    tformer_dropatt: float = 0.0
     tformer_n_head: int = 10
     tformer_wnorm: bool = True
 
@@ -97,20 +96,18 @@ class Conf:
         if self.resume_from is not None:
             assert self.out_dir.exists(), f'{self.out_dir} does not exist.'
 
-        self.out_dir.mkdir(exist_ok=True)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.logger_epoch = self.create_logger(f'epoch_logger_{self.exp_time}', self.out_dir / 'epoch.log')
 
         with (self.out_dir / 'conf.txt').open('w') as f:
             f.write(str(self))
-
-        shutil.copy(os.path.realpath(__file__), str(self.out_dir))
 
         global device
         device = self.device
 
     @property
     def out_dir(self) -> Path:
-        return const.DATA_DIR / 'experiments' / self.exp_name / self.exp_time
+        return const.DATA_DIR / 'experiments' / self.exp_name / str(self.exp_time)
 
     def __str__(self):
         return pformat(dataclasses.asdict(self))
@@ -280,12 +277,12 @@ def run_on_step(batch, meters, model):
 def run_after_step(meters):
     # log mae for each types
     lmae_types = {
-        f'lmae_{t}': np.log(meters[t].avg)
+        f'lmae_{t}': np.log(meters[f'mae_{t}'].avg)
         for t in const.TYPES
     }
 
     # competition metric
-    mean_lmae = np.log([meters[t].avg for t in const.TYPES]).mean()
+    mean_lmae = np.log([meters[f'mae_{t}'].avg for t in const.TYPES]).mean()
 
     return {
         **lmae_types,
@@ -297,7 +294,7 @@ def train(loader, model: nn.Module, optimizer: Optimizer, scheduler, conf: Conf,
     meters = AverageMeterSet()
     model.train()
 
-    for step, batch in enumerate(loader):
+    for step, batch in enumerate(tqdm(loader, leave=False)):
         meters.update('lr', optimizer.param_groups[0]['lr'])
 
         loss = run_on_step(batch, meters, model)
@@ -313,7 +310,7 @@ def train(loader, model: nn.Module, optimizer: Optimizer, scheduler, conf: Conf,
         f'{prefix}_loss': meters['loss'].avg,
         **{
             f'{prefix}_{k}': v
-            for k, v in metrics
+            for k, v in metrics.items()
         }
     }
 
@@ -322,7 +319,7 @@ def validate(loader, model: nn.Module, conf: Conf, prefix: str = 'val'):
     meters = AverageMeterSet()
     model.eval()
 
-    for step, batch in enumerate(loader):
+    for step, batch in enumerate(tqdm(loader, leave=False)):
         with torch.no_grad():
             run_on_step(batch, meters, model)
 
@@ -332,7 +329,7 @@ def validate(loader, model: nn.Module, conf: Conf, prefix: str = 'val'):
         f'{prefix}_loss': meters['loss'].avg,
         **{
             f'{prefix}_{k}': v
-            for k, v in metrics
+            for k, v in metrics.items()
         }
     }
 
@@ -369,7 +366,7 @@ def write_on_board(df_hist: pd.DataFrame, writer: SummaryWriter, conf: Conf):
         f'{conf.exp_time}_val': row.val_loss,
     }, row.epoch)
 
-    for tag in conf.types:
+    for tag in const.TYPES:
         writer.add_scalars(f'{conf.exp_name}/metric/type/{tag}', {
             f'{conf.exp_time}_train': row[f'train_lmae_{tag}'],
             f'{conf.exp_time}_val': row[f'val_lmae_{tag}'],
@@ -492,7 +489,7 @@ def main(conf: Conf):
 
 
 # %%
-main(Conf(
+conf = Conf(
     is_one_cv=True,
 
     device='cuda',
@@ -506,11 +503,11 @@ main(Conf(
     clr_gamma=0.999991,
     weight_decay=1e-4,
 
-    tformer_dim=650,
-    tformer_n_layers=14,
-    tformer_d_inner=3800,
+    tformer_dim=300,
+    tformer_n_layers=7,
+    tformer_d_inner=1024,
     tformer_dropout=0.03,
-    tformer_dropatt=0.03,
+    tformer_dropatt=0.0,
     tformer_n_head=10,
     tformer_wnorm=True,
 
@@ -519,4 +516,5 @@ main(Conf(
     db_path=const.DATA_DIR / 'artifacts' / 'data.pkl',
 
     exp_time=time(),
-))
+)
+# main(conf)
