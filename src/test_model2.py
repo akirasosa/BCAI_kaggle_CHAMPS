@@ -10,12 +10,11 @@ from torch.nn.utils import weight_norm
 from torch.utils.data import DataLoader
 from torch_scatter import scatter_mean, scatter_add
 
-from graph_transformer import GraphTransformer
-from modules.blocks import MLP
+from my_lib.torch.funcs import batched_index_select
+from my_lib.torch.modules import MLP
 from proj import const
 from proj.loader import PandasDataset, atoms_collate_fn
 from proj.util import get_scc_type_encoder
-from utils.funcs import batched_index_select
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -5,7 +5,7 @@ from torch import nn as nn
 from torch.nn.init import constant_
 from torch.nn.init import xavier_uniform_
 
-from modules.activations import shifted_softplus
+from my_lib.torch.activations import shifted_softplus
 
 zeros_initializer = partial(constant_, val=0.)
 

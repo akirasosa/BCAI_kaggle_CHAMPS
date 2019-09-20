@@ -1,20 +1,10 @@
-import torch
-import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
 
+from my_lib.torch.dataset import PandasDataset
 from proj import const
-
-
-class PandasDataset(Dataset):
-    def __init__(self, df):
-        self.df = df
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        return self.df.iloc[idx]
 
 
 def pad_2d(a, shape):
